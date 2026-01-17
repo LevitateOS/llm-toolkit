@@ -179,23 +179,43 @@ class ModelEvaluator:
         if tool_call_match:
             try:
                 call = json.loads(tool_call_match.group(1))
-                if "arguments" in call and "command" in call["arguments"]:
-                    return call["arguments"]["command"], None
+                args = call.get("arguments", {})
+                # Support both "command" key and generic args
+                if "command" in args:
+                    return args["command"], None
+                # Return first string arg as command fallback
+                for v in args.values():
+                    if isinstance(v, str):
+                        return v, None
             except json.JSONDecodeError:
                 pass
 
-        # Pattern 2: SmolLM3 style - call:function_name{param:value}
-        smol_match = re.search(r'call:(\w+)\{command:<escape>(.*?)<escape>\}', raw_output, re.DOTALL)
+        # Pattern 2: SmolLM3 style - call:function_name{param:<escape>value<escape>}
+        smol_match = re.search(r'call:(\w+)\{([^}]+)\}', raw_output, re.DOTALL)
         if smol_match:
-            return smol_match.group(2).strip(), None
+            args_str = smol_match.group(2)
+            # Extract command from <escape>...<escape> format
+            escape_match = re.search(r'command:<escape>(.*?)<escape>', args_str, re.DOTALL)
+            if escape_match:
+                return escape_match.group(1).strip(), None
+            # Fallback: try to find any <escape>...<escape> value
+            any_escape = re.search(r'<escape>(.*?)<escape>', args_str, re.DOTALL)
+            if any_escape:
+                return any_escape.group(1).strip(), None
 
         # Pattern 3: Assistant content with ```bash blocks
         bash_match = re.search(r'```(?:bash|sh)?\s*\n?(.*?)\n?```', raw_output, re.DOTALL)
         if bash_match:
             return bash_match.group(1).strip(), None
 
+        # Pattern 4: Direct $ command format in response
+        cmd_match = re.search(r'^\s*\$\s*(.+)$', raw_output, re.MULTILINE)
+        if cmd_match:
+            return cmd_match.group(1).strip(), None
+
         # No tool call found - return as text
-        text = re.sub(r'<[^>]+>', '', raw_output).strip()
+        text = re.sub(r'<think>.*?</think>', '', raw_output, flags=re.DOTALL)  # Remove thinking
+        text = re.sub(r'<[^>]+>', '', text).strip()  # Remove other tags
         return None, text if text else None
 
     def evaluate(self, test_cases: list[dict]) -> EvalSummary:

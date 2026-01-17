@@ -222,8 +222,8 @@ def main():
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha (typically 2x rank)")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
     parser.add_argument("--target-modules", nargs="+",
-                        default=["q_proj", "k_proj", "v_proj", "o_proj"],
-                        help="Target modules for LoRA")
+                        default=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                        help="Target modules for LoRA (default includes attention + MLP layers)")
 
     # Memory optimization
     parser.add_argument("--use-4bit", action="store_true", help="Use 4-bit quantization")

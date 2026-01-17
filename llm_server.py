@@ -3,7 +3,7 @@
 LLM Inference Server - HTTP server for local model inference.
 
 Loads a HuggingFace model once, serves requests via HTTP.
-Supports LoRA adapters and tool/function calling.
+Supports LoRA adapters, tool/function calling, and extensible hooks.
 
 Usage:
     python llm_server.py --model path/to/model --port 8765
@@ -18,16 +18,23 @@ API:
         "tools": [...]  // optional
     }
 
-    POST /health
+    GET /health
     Returns {"status": "ok", "model": "..."}
+
+Extensibility:
+    Create a subclass of LLMServer and override:
+    - gather_context(): Return dynamic system context string
+    - verify_response(): Post-process and validate responses
+    - build_system_prompt(): Customize the system prompt
 """
 
 import argparse
 import json
+import re
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -41,12 +48,23 @@ except ImportError:
 
 
 class LLMServer:
+    """
+    HTTP-served LLM inference with support for LoRA and tools.
+
+    Can be subclassed to add:
+    - Dynamic context injection (e.g., system facts)
+    - Response verification (e.g., hallucination detection)
+    - Custom system prompts
+    """
+
     def __init__(
         self,
         model_path: str,
         adapter_path: Optional[str] = None,
         device: Optional[str] = None,
-        dtype: str = "auto"
+        dtype: str = "auto",
+        default_system_prompt: Optional[str] = None,
+        default_tools: Optional[list] = None,
     ):
         print(f"Loading model from {model_path}...", file=sys.stderr)
 
@@ -78,12 +96,117 @@ class LLMServer:
 
         self.device = next(self.model.parameters()).device
         self.model_path = model_path
+        self.default_system_prompt = default_system_prompt or "You are a helpful assistant."
+        self.default_tools = default_tools
         print(f"Model loaded on {self.device}.", file=sys.stderr)
 
         # Ensure padding token
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+    def gather_context(self) -> Optional[str]:
+        """
+        Override in subclass to gather dynamic system context.
+
+        Returns context string to inject into system prompt, or None.
+        Called before each generation.
+        """
+        return None
+
+    def build_system_prompt(self, base_prompt: str, context: Optional[str]) -> str:
+        """
+        Build the full system prompt with optional context injection.
+
+        Override to customize how context is incorporated.
+        """
+        if context:
+            return f"{base_prompt}\n\n{context}"
+        return base_prompt
+
+    def verify_response(self, result: dict) -> dict:
+        """
+        Override in subclass to verify/modify the response before returning.
+
+        Can be used for:
+        - Hallucination detection
+        - Safety filtering
+        - Response reformatting
+
+        Args:
+            result: The generated response dict
+
+        Returns:
+            Modified result dict (can block commands, add warnings, etc.)
+        """
+        return result
+
+    def extract_response(self, raw_output: str) -> dict:
+        """
+        Parse model output into structured response.
+
+        Handles:
+        - <think>...</think> blocks (reasoning)
+        - <tool_call>...</tool_call> (function calls)
+        - Plain text responses
+        """
+        # Extract thinking content if present
+        thinking = None
+        think_match = re.search(r'<think>(.*?)</think>', raw_output, re.DOTALL)
+        if think_match:
+            thinking = think_match.group(1).strip()
+            if not thinking:
+                thinking = None
+
+        # Check for XML-style tool call: <tool_call>{"name": ..., "arguments": ...}</tool_call>
+        tool_call_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', raw_output, re.DOTALL)
+        if tool_call_match:
+            try:
+                tool_data = json.loads(tool_call_match.group(1))
+                tool_name = tool_data.get("name", "")
+                arguments = tool_data.get("arguments", {})
+
+                result = {
+                    "success": True,
+                    "type": "tool_call",
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                }
+                if thinking:
+                    result["thinking"] = thinking
+                return result
+            except json.JSONDecodeError:
+                pass
+
+        # Check for SmolLM3-style: call:function_name{param:value}
+        smol_match = re.search(r'call:(\w+)\{([^}]+)\}', raw_output, re.DOTALL)
+        if smol_match:
+            func_name = smol_match.group(1)
+            args_str = smol_match.group(2)
+
+            # Parse simple key:value format
+            arguments = {}
+            for match in re.finditer(r'(\w+):<escape>(.*?)<escape>', args_str, re.DOTALL):
+                arguments[match.group(1)] = match.group(2).strip()
+
+            result = {
+                "success": True,
+                "type": "tool_call",
+                "tool_name": func_name,
+                "arguments": arguments,
+            }
+            if thinking:
+                result["thinking"] = thinking
+            return result
+
+        # Natural language response - strip XML tags but preserve content
+        text = re.sub(r'<think>.*?</think>', '', raw_output, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', '', text).strip()
+
+        result = {"success": True, "type": "text", "response": text}
+        if thinking:
+            result["thinking"] = thinking
+        return result
 
     def generate(
         self,
@@ -92,14 +215,19 @@ class LLMServer:
         temperature: float = 0.7,
         top_p: float = 0.9,
         tools: Optional[list] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
     ) -> dict:
         """Generate response for a conversation."""
         try:
+            # Gather dynamic context
+            context = self.gather_context()
+
+            # Build system prompt
+            base_prompt = system_prompt or self.default_system_prompt
+            full_system_prompt = self.build_system_prompt(base_prompt, context)
+
             # Build message list
-            full_messages = []
-            if system_prompt:
-                full_messages.append({"role": "system", "content": system_prompt})
+            full_messages = [{"role": "system", "content": full_system_prompt}]
             full_messages.extend(messages)
 
             # Apply chat template
@@ -108,8 +236,10 @@ class LLMServer:
                 "return_dict": True,
                 "return_tensors": "pt"
             }
-            if tools:
-                template_kwargs["tools"] = tools
+
+            active_tools = tools or self.default_tools
+            if active_tools:
+                template_kwargs["tools"] = active_tools
 
             inputs = self.tokenizer.apply_chat_template(
                 full_messages,
@@ -130,9 +260,15 @@ class LLMServer:
 
             # Decode only the generated tokens
             generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
-            response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            raw_output = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
 
-            return {"success": True, "response": response.strip()}
+            # Parse response
+            result = self.extract_response(raw_output)
+
+            # Verify/filter response
+            result = self.verify_response(result)
+
+            return result
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -157,7 +293,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             })
             return
 
-        if self.path != "/generate":
+        if self.path not in ["/generate", "/query"]:  # Support both endpoints
             self._send_json({"error": "Not found"}, 404)
             return
 
@@ -202,6 +338,28 @@ class RequestHandler(BaseHTTPRequestHandler):
         print(f"[{self.address_string()}] {args[0]}", file=sys.stderr)
 
 
+def run_server(
+    server_instance: LLMServer,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+):
+    """Run the HTTP server with the given LLMServer instance."""
+    global llm_server
+    llm_server = server_instance
+
+    server = HTTPServer((host, port), RequestHandler)
+    print(f"Server listening on http://{host}:{port}", file=sys.stderr)
+    print(f"  POST /generate - Generate text", file=sys.stderr)
+    print(f"  POST /query    - Alias for /generate", file=sys.stderr)
+    print(f"  GET  /health   - Health check", file=sys.stderr)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.", file=sys.stderr)
+        server.shutdown()
+
+
 def main():
     global llm_server
 
@@ -213,6 +371,8 @@ def main():
     parser.add_argument("--device", "-d", default=None, help="Device (cuda, cpu, auto)")
     parser.add_argument("--dtype", default="auto", choices=["auto", "float16", "bfloat16", "float32"],
                         help="Model dtype")
+    parser.add_argument("--system-prompt", "-s", default=None, help="Default system prompt")
+    parser.add_argument("--tools-json", "-t", default=None, help="JSON file with default tool definitions")
     args = parser.parse_args()
 
     model_path = Path(args.model)
@@ -220,23 +380,23 @@ def main():
         print(f"Error: Model not found at {args.model}", file=sys.stderr)
         sys.exit(1)
 
+    # Load tools if specified
+    default_tools = None
+    if args.tools_json:
+        with open(args.tools_json) as f:
+            default_tools = json.load(f)
+        print(f"Loaded {len(default_tools)} tool definitions", file=sys.stderr)
+
     llm_server = LLMServer(
         args.model,
         adapter_path=args.adapter,
         device=args.device,
-        dtype=args.dtype
+        dtype=args.dtype,
+        default_system_prompt=args.system_prompt,
+        default_tools=default_tools,
     )
 
-    server = HTTPServer((args.host, args.port), RequestHandler)
-    print(f"Server listening on http://{args.host}:{args.port}", file=sys.stderr)
-    print(f"  POST /generate - Generate text", file=sys.stderr)
-    print(f"  GET  /health   - Health check", file=sys.stderr)
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down.", file=sys.stderr)
-        server.shutdown()
+    run_server(llm_server, args.host, args.port)
 
 
 if __name__ == "__main__":
