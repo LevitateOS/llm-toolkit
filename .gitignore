@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# ML artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.gguf
+*.onnx
+
+# Training outputs
+output/
+outputs/
+checkpoints/
+runs/
+logs/
+wandb/
+
+# Data
+data/
+datasets/
+*.jsonl
+*.parquet
+
+# Misc
+.DS_Store
+*.log
