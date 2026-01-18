@@ -16,16 +16,17 @@ API:
         "max_tokens": 256,
         "temperature": 0.7,
         "tools": [...]  // optional
+        "system_prompt": "...",  // optional
+        "system_context": "..."  // optional, injected into system prompt
     }
 
     GET /health
     Returns {"status": "ok", "model": "..."}
 
 Extensibility:
-    Create a subclass of LLMServer and override:
-    - gather_context(): Return dynamic system context string
-    - verify_response(): Post-process and validate responses
-    - build_system_prompt(): Customize the system prompt
+    The server accepts system_context in the request body, which is appended
+    to the system prompt. This enables stateless operation - the caller gathers
+    context and passes it with each request.
 """
 
 import argparse
@@ -51,10 +52,11 @@ class LLMServer:
     """
     HTTP-served LLM inference with support for LoRA and tools.
 
-    Can be subclassed to add:
-    - Dynamic context injection (e.g., system facts)
-    - Response verification (e.g., hallucination detection)
-    - Custom system prompts
+    Pure stateless inference server. The caller provides:
+    - system_prompt: Base system prompt
+    - system_context: Dynamic context to append (e.g., system facts)
+
+    Both are optional - defaults to a basic assistant prompt.
     """
 
     def __init__(
@@ -104,42 +106,6 @@ class LLMServer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-    def gather_context(self) -> Optional[str]:
-        """
-        Override in subclass to gather dynamic system context.
-
-        Returns context string to inject into system prompt, or None.
-        Called before each generation.
-        """
-        return None
-
-    def build_system_prompt(self, base_prompt: str, context: Optional[str]) -> str:
-        """
-        Build the full system prompt with optional context injection.
-
-        Override to customize how context is incorporated.
-        """
-        if context:
-            return f"{base_prompt}\n\n{context}"
-        return base_prompt
-
-    def verify_response(self, result: dict) -> dict:
-        """
-        Override in subclass to verify/modify the response before returning.
-
-        Can be used for:
-        - Hallucination detection
-        - Safety filtering
-        - Response reformatting
-
-        Args:
-            result: The generated response dict
-
-        Returns:
-            Modified result dict (can block commands, add warnings, etc.)
-        """
-        return result
 
     def extract_response(self, raw_output: str) -> dict:
         """
@@ -216,15 +182,26 @@ class LLMServer:
         top_p: float = 0.9,
         tools: Optional[list] = None,
         system_prompt: Optional[str] = None,
+        system_context: Optional[str] = None,
     ) -> dict:
-        """Generate response for a conversation."""
-        try:
-            # Gather dynamic context
-            context = self.gather_context()
+        """Generate response for a conversation.
 
-            # Build system prompt
+        Args:
+            messages: Conversation history
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Top-p sampling
+            tools: Tool definitions for function calling
+            system_prompt: Base system prompt
+            system_context: Dynamic context to append to system prompt
+        """
+        try:
+            # Build system prompt with optional context
             base_prompt = system_prompt or self.default_system_prompt
-            full_system_prompt = self.build_system_prompt(base_prompt, context)
+            if system_context:
+                full_system_prompt = f"{base_prompt}\n\n{system_context}"
+            else:
+                full_system_prompt = base_prompt
 
             # Build message list
             full_messages = [{"role": "system", "content": full_system_prompt}]
@@ -264,9 +241,6 @@ class LLMServer:
 
             # Parse response
             result = self.extract_response(raw_output)
-
-            # Verify/filter response
-            result = self.verify_response(result)
 
             return result
 
@@ -308,6 +282,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             top_p = data.get("top_p", 0.9)
             tools = data.get("tools")
             system_prompt = data.get("system_prompt")
+            system_context = data.get("system_context")
 
             result = llm_server.generate(
                 messages=messages,
@@ -315,7 +290,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 temperature=temperature,
                 top_p=top_p,
                 tools=tools,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                system_context=system_context,
             )
 
             self._send_json(result)

@@ -224,7 +224,7 @@ def cmd_augment(args):
 
 
 # =============================================================================
-# Thinking Annotation
+# Thinking Annotation (supports sync and batch API modes)
 # =============================================================================
 
 THINKING_PROMPT = """Generate 2-4 lines of internal reasoning for this response.
@@ -247,8 +247,8 @@ def format_conversation(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def generate_thinking(client, example: dict, model: str) -> str:
-    """Generate thinking annotation for an example."""
+def build_thinking_prompt(example: dict) -> str:
+    """Build the prompt for generating thinking annotation."""
     context = example.get("system_context", "General assistant context")
     if len(context) > 300:
         context = context[:300] + "..."
@@ -262,12 +262,17 @@ def generate_thinking(client, example: dict, model: str) -> str:
     else:
         response_content = expected.get("response", "")
 
-    prompt = THINKING_PROMPT.format(
+    return THINKING_PROMPT.format(
         context=context,
         conversation=conversation,
         response_type=response_type,
         response_content=response_content
     )
+
+
+def generate_thinking(client, example: dict, model: str) -> str:
+    """Generate thinking annotation for an example (sync API)."""
+    prompt = build_thinking_prompt(example)
 
     message = client.messages.create(
         model=model,
@@ -278,8 +283,165 @@ def generate_thinking(client, example: dict, model: str) -> str:
     return message.content[0].text.strip()
 
 
+def load_checkpoint(path: Path) -> dict:
+    """Load annotation checkpoint."""
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"processed": [], "success": 0, "errors": 0}
+
+
+def save_checkpoint(path: Path, data: dict):
+    """Save annotation checkpoint."""
+    path.write_text(json.dumps(data))
+
+
+def run_sync_annotation(client, examples: list, to_annotate: list, output_path: Path,
+                        checkpoint_path: Path, model: str, delay: float):
+    """Run sync annotation mode."""
+    checkpoint = load_checkpoint(checkpoint_path)
+    processed_set = set(checkpoint["processed"])
+
+    if processed_set:
+        print(f"Resuming: {len(processed_set)} done, {checkpoint['success']} success")
+
+    with open(output_path, "a") as out:
+        for idx, (orig_idx, example) in enumerate(to_annotate):
+            if idx in processed_set:
+                continue
+
+            user_msg = example["messages"][-1]["content"][:40] if example.get("messages") else ""
+            print(f"[{idx+1}/{len(to_annotate)}] \"{user_msg}...\"", end=" ", flush=True)
+
+            try:
+                thinking = generate_thinking(client, example, model)
+                print("OK")
+
+                new_ex = example.copy()
+                new_ex["expected_response"] = example["expected_response"].copy()
+                new_ex["expected_response"]["thinking"] = thinking
+                out.write(json.dumps(new_ex) + "\n")
+                out.flush()
+
+                checkpoint["success"] += 1
+                checkpoint["processed"].append(idx)
+                time.sleep(delay)
+
+            except anthropic.RateLimitError:
+                print("RATE LIMIT - waiting 60s")
+                time.sleep(60)
+                continue
+            except Exception as e:
+                print(f"ERROR: {e}")
+                checkpoint["errors"] += 1
+                checkpoint["processed"].append(idx)
+
+            if len(checkpoint["processed"]) % 100 == 0:
+                save_checkpoint(checkpoint_path, checkpoint)
+
+    save_checkpoint(checkpoint_path, checkpoint)
+    print(f"\nDone! Success: {checkpoint['success']}, Errors: {checkpoint['errors']}")
+
+
+def submit_batch(client, examples: list, pending_indices: list, model: str, state_file: Path):
+    """Submit batch annotation request."""
+    print(f"Building batch for {len(pending_indices)} pending examples...")
+
+    requests = []
+    for idx in pending_indices:
+        example = examples[idx]
+        prompt = build_thinking_prompt(example)
+        requests.append({
+            "custom_id": str(idx),
+            "params": {
+                "model": model,
+                "max_tokens": 150,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        })
+
+    print(f"Submitting batch of {len(requests)} requests...")
+    batch = client.messages.batches.create(requests=requests)
+
+    state = {
+        "batch_id": batch.id,
+        "num_requests": len(requests),
+        "status": batch.processing_status,
+        "indices": pending_indices,
+    }
+    state_file.write_text(json.dumps(state, indent=2))
+
+    print(f"\nBatch submitted!")
+    print(f"  ID: {batch.id}")
+    print(f"  Requests: {len(requests)}")
+    print(f"  Status: {batch.processing_status}")
+    print(f"\nCheck with: python generate_data.py annotate --input ... --output ... --batch --status")
+
+
+def check_batch_status(client, state_file: Path):
+    """Check batch status."""
+    if not state_file.exists():
+        print("No batch submitted. Run with --batch first.")
+        return
+
+    state = json.loads(state_file.read_text())
+    batch = client.messages.batches.retrieve(state["batch_id"])
+
+    print(f"Batch ID: {batch.id}")
+    print(f"Status: {batch.processing_status}")
+    print(f"Succeeded: {batch.request_counts.succeeded}/{state['num_requests']}")
+    print(f"Errored: {batch.request_counts.errored}")
+
+    if batch.processing_status == "ended":
+        print("\nBatch complete! Run with --batch --process to download results.")
+
+
+def process_batch_results(client, examples: list, state_file: Path, checkpoint_path: Path, output_path: Path):
+    """Process batch results."""
+    if not state_file.exists():
+        print("No batch submitted.")
+        return
+
+    state = json.loads(state_file.read_text())
+    batch = client.messages.batches.retrieve(state["batch_id"])
+
+    if batch.processing_status != "ended":
+        print(f"Batch not done. Status: {batch.processing_status}")
+        return
+
+    print("Downloading results...")
+
+    checkpoint = load_checkpoint(checkpoint_path)
+    success = 0
+    errors = 0
+
+    with open(output_path, "a") as out:
+        for entry in client.messages.batches.results(state["batch_id"]):
+            idx = int(entry.custom_id)
+
+            if entry.result.type == "succeeded":
+                thinking = entry.result.message.content[0].text.strip()
+                example = examples[idx]
+
+                new_ex = example.copy()
+                new_ex["expected_response"] = example["expected_response"].copy()
+                new_ex["expected_response"]["thinking"] = thinking
+                out.write(json.dumps(new_ex) + "\n")
+
+                checkpoint["processed"].append(idx)
+                checkpoint["success"] += 1
+                success += 1
+            else:
+                checkpoint["processed"].append(idx)
+                checkpoint["errors"] += 1
+                errors += 1
+
+    save_checkpoint(checkpoint_path, checkpoint)
+    print(f"\nDone! This batch: {success} success, {errors} errors")
+    print(f"Total: {checkpoint['success']} success, {checkpoint['errors']} errors")
+
+
 def cmd_annotate(args):
-    """Add thinking annotations using Claude API."""
+    """Add thinking annotations using Claude API (sync or batch mode)."""
     if not ANTHROPIC_AVAILABLE:
         print("Error: pip install anthropic", file=sys.stderr)
         sys.exit(1)
@@ -312,47 +474,43 @@ def cmd_annotate(args):
     if args.limit:
         to_annotate = to_annotate[:args.limit]
 
-    print(f"Annotating {len(to_annotate)} examples")
+    print(f"To annotate: {len(to_annotate)} examples")
     print(f"Model: {args.model}")
-    print(f"Delay: {args.delay}s between requests")
 
     if args.dry_run:
         print("(dry run - no API calls)")
         return
 
     client = anthropic.Anthropic(api_key=api_key)
-    annotated = []
-    success = 0
-    errors = 0
 
-    for idx, (orig_idx, example) in enumerate(to_annotate):
-        user_msg = example["messages"][-1]["content"][:40] if example.get("messages") else ""
-        print(f"[{idx+1}/{len(to_annotate)}] \"{user_msg}...\"", end=" ", flush=True)
+    # Checkpoint and batch state files
+    checkpoint_path = input_path.parent / ".thinking_checkpoint.json"
+    batch_state_file = input_path.parent / ".batch_state.json"
 
-        try:
-            thinking = generate_thinking(client, example, args.model)
-            print("OK")
+    # Batch mode
+    if args.batch:
+        if args.status:
+            check_batch_status(client, batch_state_file)
+        elif args.process:
+            process_batch_results(client, examples, batch_state_file, checkpoint_path, output_path)
+        else:
+            # Get pending indices
+            checkpoint = load_checkpoint(checkpoint_path)
+            processed_set = set(checkpoint["processed"])
+            pending = [i for i, _ in to_annotate if i not in processed_set]
 
-            new_ex = example.copy()
-            new_ex["expected_response"] = example["expected_response"].copy()
-            new_ex["expected_response"]["thinking"] = thinking
-            annotated.append(new_ex)
-            success += 1
+            print(f"Pending: {len(pending)} examples")
+            if pending:
+                submit_batch(client, examples, pending, args.model, batch_state_file)
+            else:
+                print("All examples already processed!")
+    else:
+        # Sync mode
+        print(f"Delay: {args.delay}s between requests")
+        run_sync_annotation(client, examples, to_annotate, output_path,
+                           checkpoint_path, args.model, args.delay)
 
-            time.sleep(args.delay)
-
-        except anthropic.RateLimitError:
-            print("RATE LIMIT - waiting 60s")
-            time.sleep(60)
-            continue
-        except Exception as e:
-            print(f"ERROR: {e}")
-            errors += 1
-            annotated.append(example)  # Keep original without thinking
-
-    save_jsonl(annotated, output_path)
-    print(f"\nDone: {success} annotated, {errors} errors")
-    print(f"Saved to {output_path}")
+    print(f"Output: {output_path}")
 
 
 # =============================================================================
@@ -381,8 +539,11 @@ def main():
     p_annotate.add_argument("--output", "-o", required=True, help="Output JSONL file")
     p_annotate.add_argument("--model", "-m", default="claude-haiku-4-5", help="Claude model")
     p_annotate.add_argument("--limit", "-l", type=int, help="Limit number of examples")
-    p_annotate.add_argument("--delay", type=float, default=1.3, help="Delay between API calls")
+    p_annotate.add_argument("--delay", type=float, default=1.3, help="Delay between API calls (sync mode)")
     p_annotate.add_argument("--dry-run", action="store_true", help="Don't make API calls")
+    p_annotate.add_argument("--batch", action="store_true", help="Use batch API (50% savings)")
+    p_annotate.add_argument("--status", action="store_true", help="Check batch status")
+    p_annotate.add_argument("--process", action="store_true", help="Process batch results")
 
     args = parser.parse_args()
 
