@@ -1,5 +1,17 @@
 # CLAUDE.md - LLM Toolkit
 
+## ⛔ STOP. READ. THEN ACT.
+
+Every time you think you know where something goes - **stop. Read first.**
+
+Every time you think something is worthless and should be deleted - **stop. Read it first.**
+
+Every time you're about to write code - **stop. Read what already exists first.**
+
+The five minutes you spend reading will save hours of cleanup.
+
+---
+
 ## What is llm-toolkit?
 
 Generic LoRA fine-tuning toolkit for training, generating data, and serving language models.

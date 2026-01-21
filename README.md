@@ -1,5 +1,7 @@
 # llm-toolkit
 
+> **STOP. READ. THEN ACT.** Before writing code, read the existing scripts. Before deleting anything (especially training data), read it first. Training data in `training/` may be gitignored but VALUABLE.
+
 Generic LoRA fine-tuning toolkit for training and serving language models.
 
 ## Tools
