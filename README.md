@@ -4,6 +4,41 @@
 
 Generic LoRA fine-tuning toolkit for training and serving language models.
 
+## Status
+
+| Metric | Value |
+|--------|-------|
+| Stage | Alpha |
+| Target | Python 3.10+ (CUDA/ROCm/CPU) |
+| Last verified | 2026-01-23 |
+
+### Works
+
+- LoRA adapter training with 4-bit quantization
+- Training data validation and augmentation
+- HTTP inference server with LoRA support
+- Adapter evaluation with test cases
+
+### Incomplete / Stubbed
+
+- Integration with LevitateOS installer TUI
+
+### Known Issues
+
+- See parent repo issues
+
+---
+
+## Author
+
+<!-- HUMAN WRITTEN - DO NOT MODIFY -->
+
+[Waiting for human input]
+
+<!-- END HUMAN WRITTEN -->
+
+---
+
 ## Tools
 
 | Tool | Purpose |
