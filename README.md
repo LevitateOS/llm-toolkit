@@ -1,52 +1,26 @@
 # llm-toolkit
 
-> **STOP. READ. THEN ACT.** Before writing code, read the existing scripts. Before deleting anything (especially training data), read it first. Training data in `training/` may be gitignored but VALUABLE.
-
-Generic LoRA fine-tuning toolkit for training and serving language models.
+Python scripts for LoRA fine-tuning. Generic toolkit, not integrated with LevitateOS installer yet.
 
 ## Status
 
-| Metric | Value |
-|--------|-------|
-| Stage | Alpha |
-| Target | Python 3.10+ (CUDA/ROCm/CPU) |
-| Last verified | 2026-01-23 |
+**Alpha.** Training works. Not integrated with installer TUI.
 
-### Works
+| Works | Doesn't work yet |
+|-------|------------------|
+| LoRA training (4-bit, 8-bit) | LevitateOS installer integration |
+| Training data validation | Automated deployment |
+| HTTP inference server | |
+| Adapter evaluation | |
 
-- LoRA adapter training with 4-bit quantization
-- Training data validation and augmentation
-- HTTP inference server with LoRA support
-- Adapter evaluation with test cases
+## Scripts
 
-### Incomplete / Stubbed
-
-- Integration with LevitateOS installer TUI
-
-### Known Issues
-
-- See parent repo issues
-
----
-
-## Author
-
-<!-- HUMAN WRITTEN - DO NOT MODIFY -->
-
-[Waiting for human input]
-
-<!-- END HUMAN WRITTEN -->
-
----
-
-## Tools
-
-| Tool | Purpose |
-|------|---------|
-| `train_lora.py` | Train LoRA adapters on HuggingFace models |
-| `generate_data.py` | Validate, augment, and annotate training data |
-| `llm_server.py` | HTTP inference server with LoRA support |
-| `evaluate.py` | Evaluate adapters with custom test cases |
+| Script | Purpose |
+|--------|---------|
+| `train_lora.py` | Train LoRA adapters |
+| `generate_data.py` | Validate/augment training data |
+| `llm_server.py` | HTTP inference server |
+| `evaluate.py` | Evaluate adapters |
 
 ## Installation
 
@@ -54,92 +28,53 @@ Generic LoRA fine-tuning toolkit for training and serving language models.
 pip install -r requirements.txt
 ```
 
-## Usage
+Requires: PyTorch, transformers, peft, bitsandbytes (optional).
 
-### Training
-
-```bash
-# Train LoRA adapter
-python train_lora.py \
-    --model path/to/base-model \
-    --data training.jsonl \
-    --output adapters/my-adapter \
-    --epochs 3 \
-    --lora-r 16
-
-# With 4-bit quantization (saves GPU memory)
-python train_lora.py --model ./model --data data.jsonl --use-4bit
-```
-
-### Data Generation
+## Training
 
 ```bash
-# Validate training data format
-python generate_data.py validate training.jsonl
+# Basic training
+python train_lora.py --model ./base-model --data training.jsonl --output ./adapter
 
-# Augment with variations
-python generate_data.py augment training.jsonl -o augmented.jsonl
-
-# Add thinking annotations (requires ANTHROPIC_API_KEY)
-python generate_data.py annotate training.jsonl -o annotated.jsonl
+# With 4-bit quantization (less VRAM)
+python train_lora.py --model ./base-model --data training.jsonl --use-4bit
 ```
 
-### Serving
+## Data Format
 
-```bash
-# Start HTTP server
-python llm_server.py \
-    --model path/to/base-model \
-    --adapter adapters/my-adapter \
-    --port 8080
-
-# Query the server
-curl -X POST http://localhost:8080/generate \
-    -H "Content-Type: application/json" \
-    -d '{"messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-### Evaluation
-
-```bash
-# Evaluate base model
-python evaluate.py --model ./model --test-cases tests.jsonl
-
-# Evaluate adapter
-python evaluate.py --model ./model --adapter ./adapter --test-cases tests.jsonl
-
-# Compare multiple adapters
-python evaluate.py --model ./model --sweep-dir ./adapters --test-cases tests.jsonl
-```
-
-## Data Formats
-
-### Training Data (JSONL)
+Training data (JSONL):
 
 ```json
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
-Or with expected response:
+## Serving
 
-```json
-{
-  "messages": [{"role": "user", "content": "..."}],
-  "expected_response": {"type": "command", "command": "ls -la", "thinking": "User wants to list files"}
-}
+```bash
+python llm_server.py --model ./base-model --adapter ./adapter --port 8080
 ```
 
-### Test Cases (JSONL)
-
-```json
-{"name": "test1", "messages": [{"role": "user", "content": "hello"}], "expected": null, "category": "greeting"}
-{"name": "test2", "messages": [{"role": "user", "content": "list files"}], "expected": "ls", "category": "command"}
-{"name": "test3", "messages": [...], "expected": ["ls", "-la"], "category": "command"}
+```bash
+curl -X POST http://localhost:8080/generate \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-- `expected: null` - Expects text response
-- `expected: "pattern"` - Expects command containing pattern
-- `expected: ["p1", "p2"]` - Expects command containing all patterns
+## Hardware Requirements
+
+| Setup | VRAM |
+|-------|------|
+| 4-bit quantized | 2-4 GB |
+| 8-bit | 4-6 GB |
+| Full precision | 8+ GB |
+| CPU only | 8+ GB RAM (slow) |
+
+## Known Limitations
+
+- Not integrated with LevitateOS installer
+- No automated deployment pipeline
+- Training data must be manually prepared
+- Server is single-threaded
 
 ## License
 
