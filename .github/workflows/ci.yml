@@ -7,18 +7,15 @@ on:
     branches: [master, main]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  changes:
+    uses: LevitateOS/LevitateOS/.github/workflows/detect-changes.yml@master
+    with:
+      type: python
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Check imports
-        run: python -c "import train_lora; import generate_data; import llm_server; import evaluate"
+  ci:
+    needs: changes
+    if: needs.changes.outputs.has_changes == 'true'
+    uses: LevitateOS/LevitateOS/.github/workflows/python-ci.yml@master
+    with:
+      python-version: '3.11'
+      check-imports: 'train_lora generate_data llm_server evaluate'
