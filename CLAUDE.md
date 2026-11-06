@@ -15,7 +15,7 @@ Generic LoRA fine-tuning toolkit. Training, data generation, and inference servi
 
 | Don't put here | Put it in |
 |----------------|-----------|
-| OS building | `leviso/` |
+| OS building | `distro-builder/` |
 | Package management | `tools/recipe/` |
 
 ## Scripts
